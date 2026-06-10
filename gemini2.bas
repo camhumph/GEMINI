@@ -372,7 +372,7 @@ Private Const PULLCORE_NAME_KEYS_BY_NESTED_CAM As Boolean = True
 ' nested-cam naming above (which uses real geometry instead of guessing a
 ' height axis), so it is OFF by default. Set True only to re-enable the older
 ' heuristic; it has no effect on key NAMES when nested-cam naming is on.
-Private Const PULLCORE_USE_LOCATION_AWARE_MATCH As Boolean = True
+Private Const PULLCORE_USE_LOCATION_AWARE_MATCH As Boolean = False
 Private Const PULLCORE_LOCATION_MATCH_WEIGHT As Double = 0.6
 ' --------------------------------------------------------------------------
 
@@ -11121,33 +11121,26 @@ On Error Resume Next
 
     If matchIdx <= 0 Or matchIdx > PullcoreMatchCount Then Exit Sub
 
-    Dim oldName As String
-    Dim sideCode As String
-    Dim finalName As String
-
-    oldName = Trim(PullcoreMatches(matchIdx).quoteName)
-    If oldName = "" Then oldName = Trim(PullcoreMatches(matchIdx).Description)
-
-    sideCode = LeadingPullcoreSideCode(newName)
-    finalName = newName
-
-    ' Preserve TE/LE descriptive names.
-    ' Example:
-    '   oldName = "OD LE Pullcore Cam"
-    '   newName = "ID PULLCORE CAM"
-    '   final   = "ID LE Pullcore Cam"
+    ' Critical:
+    ' Do not overwrite descriptive BOM names like:
+    '   ID TE Pullcore Cam
+    '   OD LE Pullcore Cam
+    '   OD TE Pullcore Key
     If PULLCORE_PRESERVE_DESCRIPTIVE_BOM_NAMES Then
-        If oldName <> "" And sideCode <> "" Then
-            If PullcoreLocationNameIsDescriptive(oldName) Or GetPullcoreLocationCode(oldName) <> "" Then
-                finalName = ForcePullcoreNameSide(oldName, sideCode)
-            End If
+        If PullcoreLocationNameIsDescriptive(PullcoreMatches(matchIdx).Description) _
+        Or PullcoreLocationNameIsDescriptive(PullcoreMatches(matchIdx).quoteName) Then
+
+            LogLine "Pullcore final generic relabel skipped. Keeping descriptive BOM name '" & _
+                    PullcoreMatches(matchIdx).quoteName & "' instead of '" & newName & "'."
+
+            Exit Sub
         End If
     End If
 
-    PullcoreMatches(matchIdx).quoteName = finalName
-    PullcoreMatches(matchIdx).Description = finalName
+    PullcoreMatches(matchIdx).quoteName = newName
+    PullcoreMatches(matchIdx).Description = newName
 
-    LogLine "Pullcore export name finalized: '" & finalName & "'"
+    LogLine "Pullcore export name finalized: '" & newName & "'"
 End Sub
 
 ' Replace the trailing "Cam" in a pullcore cam name with "Key", preserving the
@@ -11209,6 +11202,17 @@ On Error GoTo ErrHandler
     For k = 1 To PullcoreMatchCount
 
         If Not PullcoreMatches(k).isCam Then
+
+            If PULLCORE_PRESERVE_DESCRIPTIVE_BOM_NAMES Then
+                If PullcoreLocationNameIsDescriptive(PullcoreMatches(k).quoteName) _
+                Or PullcoreLocationNameIsDescriptive(PullcoreMatches(k).Description) Then
+
+                    LogLine "Pullcore nested-cam key naming skipped. Keeping descriptive BOM key name '" & _
+                            PullcoreMatches(k).quoteName & "'."
+
+                    GoTo NextPullcoreKey
+                End If
+            End If
 
             kpi = PullcoreMatches(k).CadPartIndex
 
@@ -11287,6 +11291,7 @@ On Error GoTo ErrHandler
 
         End If
 
+NextPullcoreKey:
     Next k
 
     Exit Sub
@@ -11600,6 +11605,188 @@ Private Function PullcoreDimDistanceScore(ByVal cadL As Double, ByVal cadW As Do
     PullcoreDimDistanceScore = Abs(cadL - b.BomLength) * 3# _
                              + Abs(cadW - b.BomWidth) _
                              + Abs(cadT - b.BomThickness)
+End Function
+
+Private Function PullcoreBomRowHasDescriptiveLocation(ByRef b As BomInfo) As Boolean
+On Error GoTo ErrHandler
+
+    Dim loc As String
+    loc = GetPullcoreLocationCode(b.Description)
+
+    Select Case loc
+        Case "IDTE", "IDLE", "ODTE", "ODLE", "TE", "LE"
+            PullcoreBomRowHasDescriptiveLocation = True
+            Exit Function
+    End Select
+
+    PullcoreBomRowHasDescriptiveLocation = False
+    Exit Function
+
+ErrHandler:
+    PullcoreBomRowHasDescriptiveLocation = False
+End Function
+
+Private Function PullcoreRowSetShouldUseDimensionFirst(ByRef rIdx() As Long, ByVal rowN As Long) As Boolean
+On Error GoTo ErrHandler
+
+    PullcoreRowSetShouldUseDimensionFirst = False
+
+    If rowN <= 1 Then Exit Function
+
+    Dim i As Long
+
+    ' If BOM has OD LE / OD TE / ID TE / ID LE, names are meaningful.
+    ' Do not assign by Y-rank first.
+    For i = 1 To rowN
+        If PullcoreBomRowHasDescriptiveLocation(BomRows(rIdx(i))) Then
+            PullcoreRowSetShouldUseDimensionFirst = True
+            Exit Function
+        End If
+    Next i
+
+    ' If the stock sizes differ, fitted dimensions must decide.
+    For i = 2 To rowN
+        If Abs(BomRows(rIdx(i)).BomLength - BomRows(rIdx(1)).BomLength) > SAME_SIZE_PAIR_TOL _
+        Or Abs(BomRows(rIdx(i)).BomWidth - BomRows(rIdx(1)).BomWidth) > SAME_SIZE_PAIR_TOL _
+        Or Abs(BomRows(rIdx(i)).BomThickness - BomRows(rIdx(1)).BomThickness) > SAME_SIZE_PAIR_TOL Then
+
+            PullcoreRowSetShouldUseDimensionFirst = True
+            Exit Function
+
+        End If
+    Next i
+
+    Exit Function
+
+ErrHandler:
+    PullcoreRowSetShouldUseDimensionFirst = False
+End Function
+
+Private Function TryMatchPullcoreRowsByFittedDimsDimensionFirst( _
+    ByRef rIdx() As Long, _
+    ByVal rowN As Long, _
+    ByRef candIdx() As Long, _
+    ByRef candL() As Double, _
+    ByRef candW() As Double, _
+    ByRef candT() As Double, _
+    ByVal candN As Long, _
+    ByRef rowUsed() As Boolean, _
+    ByRef candUsed() As Boolean) As Boolean
+
+On Error GoTo ErrHandler
+
+    TryMatchPullcoreRowsByFittedDimsDimensionFirst = False
+
+    If rowN <= 0 Then Exit Function
+    If candN <= 0 Then Exit Function
+
+    Dim pairCount As Long
+    pairCount = rowN
+    If candN < pairCount Then pairCount = candN
+
+    Dim pairStep As Long
+    Dim i As Long
+    Dim j As Long
+
+    Dim bestR As Long
+    Dim bestC As Long
+    Dim bestD As Double
+    Dim d As Double
+
+    Dim bomLoc As String
+    Dim cadLoc As String
+
+    Dim matchedAny As Boolean
+    matchedAny = False
+
+    LogLine "PULLCORE: using FITTED BOUNDING BOX dimension-first assignment."
+
+    For pairStep = 1 To pairCount
+
+        bestR = 0
+        bestC = 0
+        bestD = 1E+99
+
+        For i = 1 To rowN
+
+            If rowUsed(i) = False Then
+
+                For j = 1 To candN
+
+                    If candUsed(j) = False Then
+
+                        If candIdx(j) > 0 And candIdx(j) <= PartCount Then
+
+                            ' Primary and final decider:
+                            ' fitted CAD L/W/T vs BOM sorted L/W/T.
+                            d = PullcoreDimDistanceScore( _
+                                    candL(j), candW(j), candT(j), _
+                                    BomRows(rIdx(i)))
+
+                            ' Only use CAD name location if CAD actually contains
+                            ' the same descriptive token. Do NOT use Y-derived ID/OD
+                            ' side here because that caused OD LE / OD TE / ID TE swaps.
+                            bomLoc = GetPullcoreLocationCode(BomRows(rIdx(i)).Description)
+                            cadLoc = GetPullcoreLocationCode(parts(candIdx(j)).componentName & " " & parts(candIdx(j)).cleanName)
+
+                            If bomLoc <> "" And cadLoc <> "" Then
+                                If cadLoc = bomLoc Then
+                                    d = d - 0.05
+                                Else
+                                    d = d + 0.5
+                                End If
+                            End If
+
+                            If d < bestD Then
+                                bestD = d
+                                bestR = i
+                                bestC = j
+                            End If
+
+                        End If
+
+                    End If
+
+                Next j
+
+            End If
+
+        Next i
+
+        If bestR = 0 Or bestC = 0 Then Exit For
+
+        LogLine "PULLCORE fitted-dim final assignment:"
+        LogLine "  BOM '" & BomRows(rIdx(bestR)).Description & "'"
+        LogLine "  -> CAD '" & parts(candIdx(bestC)).componentName & "'"
+        LogLine "  BOM L/W/T=" & _
+                FormatNumberForCsv(BomRows(rIdx(bestR)).BomLength) & "/" & _
+                FormatNumberForCsv(BomRows(rIdx(bestR)).BomWidth) & "/" & _
+                FormatNumberForCsv(BomRows(rIdx(bestR)).BomThickness)
+        LogLine "  FIT L/W/T=" & _
+                FormatNumberForCsv(candL(bestC)) & "/" & _
+                FormatNumberForCsv(candW(bestC)) & "/" & _
+                FormatNumberForCsv(candT(bestC)) & _
+                "  score=" & FormatNumberForCsv(bestD)
+
+        AddPullcoreMatchRow BomRows(rIdx(bestR)), candIdx(bestC), _
+                            candL(bestC), candW(bestC), candT(bestC)
+
+        parts(candIdx(bestC)).UsedForBomMatch = True
+        rowUsed(bestR) = True
+
+        ' Mark every duplicate slot for this same CAD part as used.
+        MarkPullcoreCandidateSlotsUsed candIdx, candN, candUsed, candIdx(bestC)
+
+        matchedAny = True
+
+    Next pairStep
+
+    TryMatchPullcoreRowsByFittedDimsDimensionFirst = matchedAny
+    Exit Function
+
+ErrHandler:
+    LogLine "TryMatchPullcoreRowsByFittedDimsDimensionFirst error: " & Err.Description
+    TryMatchPullcoreRowsByFittedDimsDimensionFirst = False
 End Function
 
 Private Function PullcoreCandidateMatchScore(ByVal cadIdx As Long, _
@@ -12194,8 +12381,27 @@ On Error GoTo ErrHandler
     matchedByYRank = False
 
     If rowN >= 2 And candN >= rowN Then
-        matchedByYRank = TryMatchPullcoreRowsByYRank(rIdx, rowN, candIdx, candL, candW, candT, _
-                                                     candN, candLoc, rowUsed, candUsed)
+
+        ' Descriptive pullcore rows like:
+        '   ID TE Pullcore Cam
+        '   OD LE Pullcore Cam
+        '   OD TE Pullcore Key
+        ' must be assigned by fitted bounding-box dimensions first.
+        ' Y-rank is only safe for truly same-size generic qty rows.
+        If PullcoreRowSetShouldUseDimensionFirst(rIdx, rowN) Then
+
+            matchedByYRank = TryMatchPullcoreRowsByFittedDimsDimensionFirst( _
+                                rIdx, rowN, _
+                                candIdx, candL, candW, candT, candN, _
+                                rowUsed, candUsed)
+
+        End If
+
+        If matchedByYRank = False Then
+            matchedByYRank = TryMatchPullcoreRowsByYRank(rIdx, rowN, candIdx, candL, candW, candT, _
+                                                         candN, candLoc, rowUsed, candUsed)
+        End If
+
     End If
 
     If matchedByYRank = False Then
