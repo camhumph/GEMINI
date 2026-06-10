@@ -243,16 +243,6 @@ Private Const CREATE_PULLCORE_DIMENSIONS_EXCEL As Boolean = True
 Private Const PULLCORE_DIMENSIONS_REPORT_FILE As String = "Pull Core Dimensions.xlsx"
 Private Const JOB_SIGNATURE_REPORT_FILE As String = "XT_Export_Job_Signature.csv"
 
-' --- Excel fill toggles ---
-Private Const FILL_QUOTE_WORKBOOK As Boolean = True
-Private Const FILL_J000_STEEL_SHEET As Boolean = True
-Private Const DOWNLOADS_FOLDER As String = "\\Mycloudex2ultra\mexico\Downloads"
-Private Const QUOTE_SHEET_NAME As String = "QuoteWorksheet"
-Private Const POTBLOCK_STEEL_TYPE As String = "#2 4140"
-
-Private Const QUOTE_TEMPLATE_BASE_NAME As String = "Quote Steel Grinding-4-1-2024-rj"
-Private Const J000_TEMPLATE_BASE_NAME As String = "J000-STEEL SHEET-std"
-
 ' ============================================================
 ' MAIN ASSEMBLY / HOLDERS PACKAGE SETTINGS
 ' ============================================================
@@ -8990,119 +8980,6 @@ End Function
 ' END OF PART 4
 ' Paste Part 5 immediately after this.
 ' ============================================================
-' ============================================================
-' EXCEL TEMPLATE FIND
-' ============================================================
-
-Private Function FindQuoteWorkbookInJobFolder(ByVal jobFolder As String) As String
-On Error GoTo ErrHandler
-    FindQuoteWorkbookInJobFolder = FindExcelTemplateByBaseName(jobFolder, QUOTE_TEMPLATE_BASE_NAME)
-
-    If FindQuoteWorkbookInJobFolder = "" Then
-        LogLine "Exact Quote template not found: " & jobFolder & "\" & QUOTE_TEMPLATE_BASE_NAME & ".xls/xlsx/xlsm"
-    Else
-        LogLine "Exact Quote template found: " & FindQuoteWorkbookInJobFolder
-    End If
-
-    Exit Function
-
-ErrHandler:
-    LogLine "FindQuoteWorkbookInJobFolder error: " & Err.Description
-    FindQuoteWorkbookInJobFolder = ""
-End Function
-
-Private Function FindJ000WorkbookInJobFolder(ByVal jobFolder As String) As String
-On Error GoTo ErrHandler
-    FindJ000WorkbookInJobFolder = FindExcelTemplateByBaseName(jobFolder, J000_TEMPLATE_BASE_NAME)
-
-    If FindJ000WorkbookInJobFolder = "" Then
-        LogLine "Exact J000 template not found: " & jobFolder & "\" & J000_TEMPLATE_BASE_NAME & ".xls/xlsx/xlsm"
-    Else
-        LogLine "Exact J000 template found: " & FindJ000WorkbookInJobFolder
-    End If
-
-    Exit Function
-
-ErrHandler:
-    LogLine "FindJ000WorkbookInJobFolder error: " & Err.Description
-    FindJ000WorkbookInJobFolder = ""
-End Function
-
-Private Function FindExcelTemplateByBaseName(ByVal rootFolder As String, ByVal templateBaseName As String) As String
-On Error GoTo ErrHandler
-    FindExcelTemplateByBaseName = ""
-
-    Dim fso As Object
-    Set fso = CreateObject("Scripting.FileSystemObject")
-
-    If Not fso.FolderExists(rootFolder) Then
-        LogLine "Template root folder does not exist: " & rootFolder
-        Exit Function
-    End If
-
-    ' First try exact files directly in the folder.
-    Dim exts As Variant
-    exts = Array("xlsm", "xlsx", "xls")
-
-    Dim i As Long
-    Dim p As String
-
-    For i = LBound(exts) To UBound(exts)
-        p = rootFolder & "\" & templateBaseName & "." & CStr(exts(i))
-        If fso.FileExists(p) Then
-            FindExcelTemplateByBaseName = p
-            Exit Function
-        End If
-    Next i
-
-    ' Then search recursively in case the template is inside a subfolder.
-    Dim found As String
-    found = ""
-    SearchExcelTemplateByBaseNameRecursive fso.GetFolder(rootFolder), templateBaseName, found
-
-    FindExcelTemplateByBaseName = found
-    Exit Function
-
-ErrHandler:
-    LogLine "FindExcelTemplateByBaseName error: " & Err.Description
-    FindExcelTemplateByBaseName = ""
-End Function
-
-Private Sub SearchExcelTemplateByBaseNameRecursive(ByVal folder As Object, ByVal templateBaseName As String, ByRef found As String)
-On Error Resume Next
-    If found <> "" Then Exit Sub
-
-    If UCase(folder.Name) = UCase(EXTRACT_FOLDER_NAME) Then Exit Sub
-
-    Dim fso As Object
-    Set fso = CreateObject("Scripting.FileSystemObject")
-
-    Dim file As Object
-    Dim fileBase As String
-    Dim ext As String
-
-    For Each file In folder.Files
-        If Left(file.Name, 2) <> "~$" Then
-            fileBase = fso.GetBaseName(file.path)
-            ext = LCase(fso.GetExtensionName(file.path))
-
-            If LCase(fileBase) = LCase(templateBaseName) Then
-                If ext = "xls" Or ext = "xlsx" Or ext = "xlsm" Then
-                    found = file.path
-                    Exit Sub
-                End If
-            End If
-        End If
-    Next file
-
-    Dim subFolder As Object
-    For Each subFolder In folder.SubFolders
-        If found = "" Then
-            SearchExcelTemplateByBaseNameRecursive subFolder, templateBaseName, found
-        End If
-    Next subFolder
-End Sub
-
 ' ============================================================
 ' BOM FIND / READ (EXCEL)
 ' ============================================================
