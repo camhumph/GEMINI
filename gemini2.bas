@@ -311,6 +311,30 @@ Private Const PULLCORE_L_TOL As Double = 0.35
 Private Const USE_PULLCORE_BEST_FIT_BBOX As Boolean = True
 Private Const PULLCORE_BEST_FIT_ALL_PARTS As Boolean = False
 
+Private Const PULLCORE_BROAD_CANDIDATE_RECOVERY As Boolean = True
+Private Const PULLCORE_FINAL_BBOX_FROM_ISOLATED_OWN_FILE As Boolean = True
+Private Const PULLCORE_PAIR_ANGLE_SCORE_TOL As Double = 0.55
+Private Const PULLCORE_ANGLE_AWARE_CANDIDATES As Boolean = True
+Private Const PULLCORE_ANGLE_INFER_ANY_ANGLE As Boolean = False
+
+Private Const PULLCORE_CAM_BROAD_MIN_L As Double = 3.3
+Private Const PULLCORE_CAM_BROAD_MAX_L As Double = 5.8
+Private Const PULLCORE_CAM_BROAD_MIN_W As Double = 1.6
+Private Const PULLCORE_CAM_BROAD_MAX_W As Double = 3.6
+Private Const PULLCORE_CAM_BROAD_MIN_T As Double = 0.7
+Private Const PULLCORE_CAM_BROAD_MAX_T As Double = 2.9
+Private Const PULLCORE_CAM_BROAD_MIN_VOL As Double = 10#
+Private Const PULLCORE_CAM_BROAD_MAX_VOL As Double = 70#
+
+Private Const PULLCORE_KEY_BROAD_MIN_L As Double = 2.4
+Private Const PULLCORE_KEY_BROAD_MAX_L As Double = 4.1
+Private Const PULLCORE_KEY_BROAD_MIN_W As Double = 0.7
+Private Const PULLCORE_KEY_BROAD_MAX_W As Double = 1.9
+Private Const PULLCORE_KEY_BROAD_MIN_T As Double = 0.45
+Private Const PULLCORE_KEY_BROAD_MAX_T As Double = 1.7
+Private Const PULLCORE_KEY_BROAD_MIN_VOL As Double = 2#
+Private Const PULLCORE_KEY_BROAD_MAX_VOL As Double = 14#
+
 ' ---- PULLCORE DETECTION / NAMING FIX (added) -----------------------------
 ' Respect the BOM quantity exactly. The old code forced every KEY row to be
 ' counted at least twice, which manufactured phantom rows whenever the model
@@ -11578,6 +11602,242 @@ Private Function PullcoreDimDistanceScore(ByVal cadL As Double, ByVal cadW As Do
                              + Abs(cadT - b.BomThickness)
 End Function
 
+Private Function PullcoreCandidateMatchScore(ByVal cadIdx As Long, _
+                                             ByVal cadL As Double, _
+                                             ByVal cadW As Double, _
+                                             ByVal cadT As Double, _
+                                             ByRef b As BomInfo) As Double
+On Error GoTo ErrHandler
+
+    Dim directScore As Double
+    Dim angleScore As Double
+
+    directScore = PullcoreDimDistanceScore(cadL, cadW, cadT, b)
+    angleScore = PullcoreAngleAabbScoreForBomAndCad(b, cadL, cadW, cadT)
+
+    If angleScore < directScore Then
+        PullcoreCandidateMatchScore = angleScore
+    Else
+        PullcoreCandidateMatchScore = directScore
+    End If
+
+    If cadIdx > 0 And cadIdx <= PartCount Then
+        LogLine "PULLCORE pair score: BOM '" & b.Description & _
+                "' vs CAD '" & parts(cadIdx).componentName & "'" & _
+                " direct=" & FormatNumberForCsv(directScore) & _
+                " angle=" & FormatNumberForCsv(angleScore) & _
+                " used=" & FormatNumberForCsv(PullcoreCandidateMatchScore)
+    End If
+
+    Exit Function
+
+ErrHandler:
+    PullcoreCandidateMatchScore = 1E+99
+End Function
+
+Private Function PullcoreAngleAabbScoreForBomAndCad(ByRef b As BomInfo, _
+                                                    ByVal cadL As Double, _
+                                                    ByVal cadW As Double, _
+                                                    ByVal cadT As Double) As Double
+On Error GoTo ErrHandler
+
+    PullcoreAngleAabbScoreForBomAndCad = 1E+99
+
+    If b.hasDims = False Then Exit Function
+    If b.BomLength <= 0# Or b.BomWidth <= 0# Or b.BomThickness <= 0# Then Exit Function
+    If cadL <= 0# Or cadW <= 0# Or cadT <= 0# Then Exit Function
+
+    Dim bL As Double
+    Dim bW As Double
+    Dim bT As Double
+
+    Dim cL As Double
+    Dim cW As Double
+    Dim cT As Double
+
+    SortThreeDimensions b.BomLength, b.BomWidth, b.BomThickness, bL, bW, bT
+    SortThreeDimensions cadL, cadW, cadT, cL, cW, cT
+
+    Dim bestErr As Double
+    bestErr = 1E+99
+
+    Dim angleCsv As String
+    angleCsv = DetectedPullcoreAnglesCsv
+
+    If PULLCORE_FALLBACK_ANGLE_DEG > 0# Then
+        If angleCsv = "" Then
+            angleCsv = Format(PULLCORE_FALLBACK_ANGLE_DEG, "0.0")
+        Else
+            angleCsv = angleCsv & "|" & Format(PULLCORE_FALLBACK_ANGLE_DEG, "0.0")
+        End If
+    End If
+
+    Dim angles() As String
+    Dim k As Long
+    Dim angDeg As Double
+    Dim e As Double
+
+    If angleCsv <> "" Then
+
+        angles = Split(angleCsv, "|")
+
+        For k = LBound(angles) To UBound(angles)
+
+            angDeg = val(angles(k))
+
+            If angDeg > 0.5 And angDeg < 89.5 Then
+                e = RotatedBlockAabbBestError(bL, bW, bT, cL, cW, cT, angDeg)
+                If e < bestErr Then bestErr = e
+            End If
+
+        Next k
+
+    End If
+
+    If PULLCORE_ANGLE_INFER_ANY_ANGLE Then
+
+        angDeg = 0.5
+
+        Do While angDeg <= 89.5
+            e = RotatedBlockAabbBestError(bL, bW, bT, cL, cW, cT, angDeg)
+            If e < bestErr Then bestErr = e
+            angDeg = angDeg + 0.5
+        Loop
+
+    End If
+
+    If bestErr <= PULLCORE_PAIR_ANGLE_SCORE_TOL Then
+        PullcoreAngleAabbScoreForBomAndCad = bestErr
+    Else
+        PullcoreAngleAabbScoreForBomAndCad = 1E+99
+    End If
+
+    Exit Function
+
+ErrHandler:
+    PullcoreAngleAabbScoreForBomAndCad = 1E+99
+End Function
+
+Private Function RotatedBlockAabbBestError(ByVal bL As Double, _
+                                           ByVal bW As Double, _
+                                           ByVal bT As Double, _
+                                           ByVal cL As Double, _
+                                           ByVal cW As Double, _
+                                           ByVal cT As Double, _
+                                           ByVal angDeg As Double) As Double
+On Error GoTo ErrHandler
+
+    RotatedBlockAabbBestError = 1E+99
+
+    Dim rad As Double
+    rad = angDeg * PI_VALUE / 180#
+
+    Dim dims(1 To 3) As Double
+    dims(1) = bL
+    dims(2) = bW
+    dims(3) = bT
+
+    Dim keepAxis As Long
+    Dim i As Long
+    Dim n As Long
+
+    Dim a As Double
+    Dim b2 As Double
+
+    Dim pA As Double
+    Dim pB As Double
+
+    Dim eL As Double
+    Dim eW As Double
+    Dim eT As Double
+
+    Dim errVal As Double
+    Dim bestErr As Double
+
+    bestErr = 1E+99
+
+    For keepAxis = 1 To 3
+
+        n = 0
+        a = 0#
+        b2 = 0#
+
+        For i = 1 To 3
+
+            If i <> keepAxis Then
+
+                n = n + 1
+
+                If n = 1 Then
+                    a = dims(i)
+                Else
+                    b2 = dims(i)
+                End If
+
+            End If
+
+        Next i
+
+        pA = a * Cos(rad) + b2 * Sin(rad)
+        pB = a * Sin(rad) + b2 * Cos(rad)
+
+        SortThreeDimensions dims(keepAxis), pA, pB, eL, eW, eT
+
+        errVal = Abs(eL - cL) + Abs(eW - cW) + Abs(eT - cT)
+
+        If errVal < bestErr Then bestErr = errVal
+
+    Next keepAxis
+
+    RotatedBlockAabbBestError = bestErr
+    Exit Function
+
+ErrHandler:
+    RotatedBlockAabbBestError = 1E+99
+End Function
+
+Private Function DetectedPullcoreAnglesCsv() As String
+On Error GoTo ErrHandler
+
+    DetectedPullcoreAnglesCsv = ""
+
+    Dim seen As Object
+    Set seen = CreateObject("Scripting.Dictionary")
+
+    Dim i As Long
+    Dim key As String
+
+    For i = 1 To PullcoreMatchCount
+        If Abs(PullcoreMatches(i).DetectedAngleDeg) >= PULLCORE_STRAIGHTEN_MIN_DEG Then
+            key = Format(PullcoreMatches(i).DetectedAngleDeg, "0.0")
+            If Not seen.Exists(key) Then seen(key) = 1
+        End If
+    Next i
+
+    Dim keys As Variant
+    Dim j As Long
+    Dim csv As String
+
+    csv = ""
+
+    If seen.count > 0 Then
+        keys = seen.Keys
+        For j = LBound(keys) To UBound(keys)
+            If csv = "" Then
+                csv = CStr(keys(j))
+            Else
+                csv = csv & "|" & CStr(keys(j))
+            End If
+        Next j
+    End If
+
+    DetectedPullcoreAnglesCsv = csv
+    Exit Function
+
+ErrHandler:
+    DetectedPullcoreAnglesCsv = ""
+End Function
+
 Private Sub MarkPullcoreCandidateSlotsUsed(ByRef candIdx() As Long, ByVal candN As Long, _
                                            ByRef candUsed() As Boolean, ByVal usedCadIdx As Long)
     Dim j As Long
@@ -11649,7 +11909,9 @@ On Error GoTo ErrHandler
         If already = False Then
             uniqN = uniqN + 1
             uniqCad(uniqN) = candIdx(j)
-            uniqScore(uniqN) = PullcoreDimDistanceScore(candL(j), candW(j), candT(j), refBom)
+            uniqScore(uniqN) = PullcoreCandidateMatchScore(uniqCad(uniqN), _
+                                                           candL(j), candW(j), candT(j), _
+                                                           refBom)
             uniqLoc(uniqN) = candLoc(j)
         End If
 
@@ -11755,12 +12017,28 @@ On Error GoTo ErrHandler
             bfW = parts(pickCad(k)).Width
             bfT = parts(pickCad(k)).Thickness
 
-            If USE_PULLCORE_BEST_FIT_BBOX Then
+            If PULLCORE_FINAL_BBOX_FROM_ISOLATED_OWN_FILE Then
+
+                If TryGetPullcoreFinalBboxFromIsolatedOwnFile(pickCad(k), bfL, bfW, bfT) = False Then
+
+                    If USE_PULLCORE_BEST_FIT_BBOX Then
+                        If TryGetPullcoreBestFitDims(pickCad(k), bfL, bfW, bfT) = False Then
+                            bfL = parts(pickCad(k)).Length
+                            bfW = parts(pickCad(k)).Width
+                            bfT = parts(pickCad(k)).Thickness
+                        End If
+                    End If
+
+                End If
+
+            ElseIf USE_PULLCORE_BEST_FIT_BBOX Then
+
                 If TryGetPullcoreBestFitDims(pickCad(k), bfL, bfW, bfT) = False Then
                     bfL = parts(pickCad(k)).Length
                     bfW = parts(pickCad(k)).Width
                     bfT = parts(pickCad(k)).Thickness
                 End If
+
             End If
 
             AddPullcoreMatchRow BomRows(rIdx(k)), pickCad(k), bfL, bfW, bfT
@@ -11806,10 +12084,19 @@ On Error GoTo ErrHandler
             isCand = False
 
             For j = 1 To rowN
+
                 If IsRoughPullcoreCandidateForBom(i, BomRows(bomRowIdx(j))) Then
                     isCand = True
                     Exit For
                 End If
+
+                If PULLCORE_BROAD_CANDIDATE_RECOVERY Then
+                    If IsBroadPullcoreCandidateForBom(i, BomRows(bomRowIdx(j)), wantCam) Then
+                        isCand = True
+                        Exit For
+                    End If
+                End If
+
             Next j
 
             If isCand Then
@@ -11822,12 +12109,28 @@ On Error GoTo ErrHandler
                 bfW = parts(i).Width
                 bfT = parts(i).Thickness
 
-                If USE_PULLCORE_BEST_FIT_BBOX Then
+                If PULLCORE_FINAL_BBOX_FROM_ISOLATED_OWN_FILE Then
+
+                    If TryGetPullcoreFinalBboxFromIsolatedOwnFile(i, bfL, bfW, bfT) = False Then
+
+                        If USE_PULLCORE_BEST_FIT_BBOX Then
+                            If TryGetPullcoreBestFitDims(i, bfL, bfW, bfT) = False Then
+                                bfL = parts(i).Length
+                                bfW = parts(i).Width
+                                bfT = parts(i).Thickness
+                            End If
+                        End If
+
+                    End If
+
+                ElseIf USE_PULLCORE_BEST_FIT_BBOX Then
+
                     If TryGetPullcoreBestFitDims(i, bfL, bfW, bfT) = False Then
                         bfL = parts(i).Length
                         bfW = parts(i).Width
                         bfT = parts(i).Thickness
                     End If
+
                 End If
 
                 candN = candN + 1
@@ -11924,7 +12227,9 @@ On Error GoTo ErrHandler
 
                             Dim d As Double
 
-                            d = PullcoreDimDistanceScore(candL(j), candW(j), candT(j), BomRows(rIdx(i)))
+                            d = PullcoreCandidateMatchScore(candIdx(j), _
+                                                            candL(j), candW(j), candT(j), _
+                                                            BomRows(rIdx(i)))
 
                             ' Steer "OD ..." rows toward OD-side parts and
                             ' "ID ..." rows toward ID-side parts. Zero effect when
@@ -12106,6 +12411,107 @@ On Error GoTo ErrHandler
 
 ErrHandler:
     IsRoughPullcoreCandidateForBom = False
+End Function
+
+Private Function IsBroadPullcoreCandidateForBom(ByVal cadIdx As Long, _
+                                                ByRef b As BomInfo, _
+                                                ByVal wantCam As Boolean) As Boolean
+On Error GoTo ErrHandler
+
+    IsBroadPullcoreCandidateForBom = False
+
+    If cadIdx <= 0 Or cadIdx > PartCount Then Exit Function
+    If parts(cadIdx).UsedForBomMatch Then Exit Function
+    If b.hasDims = False Then Exit Function
+
+    Dim L As Double
+    Dim W As Double
+    Dim T As Double
+    Dim vol As Double
+
+    L = parts(cadIdx).Length
+    W = parts(cadIdx).Width
+    T = parts(cadIdx).Thickness
+    vol = L * W * T
+
+    If L <= 0# Or W <= 0# Or T <= 0# Then Exit Function
+
+    Dim hay As String
+    hay = NormalizeText(parts(cadIdx).componentName & " " & _
+                        parts(cadIdx).cleanName & " " & _
+                        parts(cadIdx).filePath)
+
+    ' Do not let unrelated package parts leak into pullcore matching.
+    If ContainsAnyPipeKey(hay, J_BLOCK_NAME_KEYS) Then Exit Function
+    If ContainsAnyPipeKey(hay, EJECTOR_CAM_NAME_KEYS) Then
+        If InStr(hay, "PULLCORE") = 0 And InStr(hay, "PULL CORE") = 0 Then Exit Function
+    End If
+
+    If wantCam Then
+
+        If vol < PULLCORE_CAM_BROAD_MIN_VOL Or vol > PULLCORE_CAM_BROAD_MAX_VOL Then Exit Function
+        If L < PULLCORE_CAM_BROAD_MIN_L Or L > PULLCORE_CAM_BROAD_MAX_L Then Exit Function
+        If W < PULLCORE_CAM_BROAD_MIN_W Or W > PULLCORE_CAM_BROAD_MAX_W Then Exit Function
+        If T < PULLCORE_CAM_BROAD_MIN_T Or T > PULLCORE_CAM_BROAD_MAX_T Then Exit Function
+
+    Else
+
+        If vol < PULLCORE_KEY_BROAD_MIN_VOL Or vol > PULLCORE_KEY_BROAD_MAX_VOL Then Exit Function
+        If L < PULLCORE_KEY_BROAD_MIN_L Or L > PULLCORE_KEY_BROAD_MAX_L Then Exit Function
+        If W < PULLCORE_KEY_BROAD_MIN_W Or W > PULLCORE_KEY_BROAD_MAX_W Then Exit Function
+        If T < PULLCORE_KEY_BROAD_MIN_T Or T > PULLCORE_KEY_BROAD_MAX_T Then Exit Function
+
+    End If
+
+    ' Still require it to be at least roughly near the BOM size or explainable
+    ' as an angled pullcore block.
+    Dim bL As Double
+    Dim bW As Double
+    Dim bT As Double
+
+    Dim cL As Double
+    Dim cW As Double
+    Dim cT As Double
+
+    SortThreeDimensions b.BomLength, b.BomWidth, b.BomThickness, bL, bW, bT
+    SortThreeDimensions L, W, T, cL, cW, cT
+
+    If Abs(cL - bL) <= 1.2 And _
+       Abs(cW - bW) <= 1.4 And _
+       Abs(cT - bT) <= 1.6 Then
+
+        IsBroadPullcoreCandidateForBom = True
+
+        LogLine "PULLCORE broad candidate kept: " & parts(cadIdx).componentName & _
+                " for BOM '" & b.Description & "'" & _
+                " CAD L/W/T=" & FormatNumberForCsv(L) & "/" & _
+                FormatNumberForCsv(W) & "/" & _
+                FormatNumberForCsv(T)
+
+        Exit Function
+
+    End If
+
+    If PULLCORE_ANGLE_AWARE_CANDIDATES Then
+        If PullcoreAngleAabbScoreForBomAndCad(b, L, W, T) <= PULLCORE_PAIR_ANGLE_SCORE_TOL Then
+
+            IsBroadPullcoreCandidateForBom = True
+
+            LogLine "PULLCORE broad angle candidate kept: " & parts(cadIdx).componentName & _
+                    " for BOM '" & b.Description & "'" & _
+                    " CAD L/W/T=" & FormatNumberForCsv(L) & "/" & _
+                    FormatNumberForCsv(W) & "/" & _
+                    FormatNumberForCsv(T)
+
+            Exit Function
+
+        End If
+    End If
+
+    Exit Function
+
+ErrHandler:
+    IsBroadPullcoreCandidateForBom = False
 End Function
 
 ' ============================================================
@@ -13674,6 +14080,388 @@ End Sub
 ' ============================================================
 ' PULLCORE BEST-FIT BBOX / STRAIGHTENING
 ' ============================================================
+
+Private Function TryGetPullcoreFinalBboxFromIsolatedOwnFile(ByVal cadIdx As Long, _
+                                                            ByRef outL As Double, _
+                                                            ByRef outW As Double, _
+                                                            ByRef outT As Double) As Boolean
+On Error GoTo ErrHandler
+
+    TryGetPullcoreFinalBboxFromIsolatedOwnFile = False
+
+    outL = 0#
+    outW = 0#
+    outT = 0#
+
+    If cadIdx <= 0 Or cadIdx > PartCount Then Exit Function
+
+    If PullcoreBestFitDimCache Is Nothing Then
+        Set PullcoreBestFitDimCache = CreateObject("Scripting.Dictionary")
+    End If
+
+    Dim cacheKey As String
+    cacheKey = "OWNFILE|" & CStr(cadIdx)
+
+    If PullcoreBestFitDimCache.Exists(cacheKey) Then
+
+        Dim cached() As String
+        cached = Split(CStr(PullcoreBestFitDimCache(cacheKey)), "|")
+
+        If UBound(cached) >= 2 Then
+            outL = CDbl(cached(0))
+            outW = CDbl(cached(1))
+            outT = CDbl(cached(2))
+
+            TryGetPullcoreFinalBboxFromIsolatedOwnFile = (outL > 0# And outW > 0# And outT > 0#)
+            Exit Function
+        End If
+
+    End If
+
+    Dim tempFolder As String
+    Dim tempXtPath As String
+
+    tempFolder = Environ$("TEMP") & "\CMS_PULLCORE_CAND_" & _
+                 Format(Now, "yyyymmdd_hhnnss") & "_" & CStr(cadIdx)
+
+    EnsureFolderDeep tempFolder
+
+    tempXtPath = tempFolder & "\PULLCORE_CAND_" & CStr(cadIdx) & ".x_t"
+
+    If SaveIsolatedCadIndexToOwnXtFile(cadIdx, tempXtPath) = False Then
+        LogLine "PULLCORE own-file bbox failed: could not save isolated candidate XT for " & _
+                parts(cadIdx).componentName
+        GoTo CleanExit
+    End If
+
+    If ReadFinalBboxFromOwnCandidateFile(tempXtPath, outL, outW, outT) = False Then
+        LogLine "PULLCORE own-file bbox failed: could not read final bbox from " & tempXtPath
+        GoTo CleanExit
+    End If
+
+    SortThreeDimensions outL, outW, outT, outL, outW, outT
+
+    outL = Round(outL, DIM_DECIMALS)
+    outW = Round(outW, DIM_DECIMALS)
+    outT = Round(outT, DIM_DECIMALS)
+
+    PullcoreBestFitDimCache(cacheKey) = CStr(outL) & "|" & CStr(outW) & "|" & CStr(outT)
+
+    LogLine "PULLCORE final bbox from isolated own file:"
+    LogLine "  CAD=" & parts(cadIdx).componentName
+    LogLine "  L/W/T=" & FormatNumberForCsv(outL) & "/" & _
+                       FormatNumberForCsv(outW) & "/" & _
+                       FormatNumberForCsv(outT)
+
+    TryGetPullcoreFinalBboxFromIsolatedOwnFile = True
+
+CleanExit:
+    On Error Resume Next
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If Not fso Is Nothing Then
+        If tempFolder <> "" Then
+            If fso.FolderExists(tempFolder) Then fso.DeleteFolder tempFolder, True
+        End If
+    End If
+
+    Exit Function
+
+ErrHandler:
+    LogLine "TryGetPullcoreFinalBboxFromIsolatedOwnFile error: " & Err.Description
+    TryGetPullcoreFinalBboxFromIsolatedOwnFile = False
+    Resume CleanExit
+End Function
+
+Private Function SaveIsolatedCadIndexToOwnXtFile(ByVal cadIdx As Long, _
+                                                 ByVal xtPath As String) As Boolean
+On Error GoTo ErrHandler
+
+    SaveIsolatedCadIndexToOwnXtFile = False
+
+    If cadIdx <= 0 Or cadIdx > PartCount Then Exit Function
+    If xtPath = "" Then Exit Function
+    If swModel Is Nothing Then Exit Function
+
+    EnsureFolderDeep GetParentFolderPath(xtPath)
+
+    If swModel.GetType = swDocPART Then
+
+        If parts(cadIdx).isBodyOnly Then
+            ShowOnlyPartBody swModel, parts(cadIdx).bodyName
+            SaveModelCopyAs swModel, xtPath
+            ShowAllPartBodies swModel
+        Else
+            SaveModelCopyAs swModel, xtPath
+        End If
+
+        Dim fsoP As Object
+        Set fsoP = CreateObject("Scripting.FileSystemObject")
+
+        SaveIsolatedCadIndexToOwnXtFile = fsoP.FileExists(xtPath)
+        Exit Function
+
+    End If
+
+    If swModel.GetType <> swDocASSEMBLY Then Exit Function
+
+    Dim vComps As Variant
+    vComps = swModel.GetComponents(False)
+
+    If IsEmpty(vComps) Then Exit Function
+    If IsArray(vComps) = False Then Exit Function
+
+    Dim targetName As String
+    targetName = parts(cadIdx).componentName
+
+    Dim i As Long
+    Dim swComp As Object
+    Dim foundTarget As Boolean
+
+    Dim suppressedObjects As Collection
+    Set suppressedObjects = New Collection
+
+    swModel.ClearSelection2 True
+
+    For i = 0 To UBound(vComps)
+
+        Set swComp = vComps(i)
+
+        If Not swComp Is Nothing Then
+            If swComp.IsSuppressed = False Then
+
+                If LCase(swComp.Name2) = LCase(targetName) Then
+                    foundTarget = True
+                Else
+                    If swComp.Select4(True, Nothing, False) Then
+                        suppressedObjects.Add swComp
+                    End If
+                End If
+
+            End If
+        End If
+
+    Next i
+
+    If foundTarget = False Then
+        LogLine "PULLCORE isolated own-file save failed: target component not found: " & targetName
+        GoTo CleanExit
+    End If
+
+    If suppressedObjects.count > 0 Then
+        swModel.EditSuppress2
+    End If
+
+    swModel.ClearSelection2 True
+
+    LogLine "PULLCORE saving isolated candidate own XT:"
+    LogLine "  CAD=" & targetName
+    LogLine "  XT =" & xtPath
+
+    SaveModelCopyAs swModel, xtPath
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    SaveIsolatedCadIndexToOwnXtFile = fso.FileExists(xtPath)
+
+CleanExit:
+    On Error Resume Next
+
+    swModel.ClearSelection2 True
+
+    Dim obj As Object
+
+    If Not suppressedObjects Is Nothing Then
+
+        For i = 1 To suppressedObjects.count
+            Set obj = suppressedObjects(i)
+            If Not obj Is Nothing Then obj.Select4 True, Nothing, False
+        Next i
+
+        If suppressedObjects.count > 0 Then swModel.EditUnsuppress2
+
+    End If
+
+    swModel.ClearSelection2 True
+
+    Exit Function
+
+ErrHandler:
+    LogLine "SaveIsolatedCadIndexToOwnXtFile error: " & Err.Description
+    SaveIsolatedCadIndexToOwnXtFile = False
+    Resume CleanExit
+End Function
+
+Private Function ReadFinalBboxFromOwnCandidateFile(ByVal xtPath As String, _
+                                                   ByRef outL As Double, _
+                                                   ByRef outW As Double, _
+                                                   ByRef outT As Double) As Boolean
+On Error GoTo ErrHandler
+
+    ReadFinalBboxFromOwnCandidateFile = False
+
+    outL = 0#
+    outW = 0#
+    outT = 0#
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If fso.FileExists(xtPath) = False Then Exit Function
+
+    Dim importErrors As Long
+    Dim errs As Long
+    Dim warns As Long
+
+    Dim mdl As Object
+    Set mdl = swApp.LoadFile4(xtPath, "", Nothing, importErrors)
+
+    If mdl Is Nothing Then
+        Set mdl = swApp.OpenDoc6(xtPath, swDocPART, swOpenDocOptions_Silent, "", errs, warns)
+    End If
+
+    If mdl Is Nothing Then
+        Set mdl = swApp.OpenDoc6(xtPath, swDocASSEMBLY, swOpenDocOptions_Silent, "", errs, warns)
+    End If
+
+    If mdl Is Nothing Then
+        LogLine "ReadFinalBboxFromOwnCandidateFile failed to open: " & xtPath
+        Exit Function
+    End If
+
+    swApp.ActivateDoc3 mdl.GetTitle, False, 0, errs
+    EnsureSwHidden
+
+    If mdl.GetType = swDocPART Then
+
+        If TryCreateAndReadBestFitBoundingBox(mdl, outL, outW, outT) = False Then
+            Dim dx As Double
+            Dim dy As Double
+            Dim dz As Double
+
+            If GetPartBoundingBoxInches(mdl, dx, dy, dz) Then
+                SortThreeDimensions dx, dy, dz, outL, outW, outT
+            End If
+        End If
+
+    ElseIf mdl.GetType = swDocASSEMBLY Then
+
+        If TryReadBestFitDimsFromAssemblyCandidate(mdl, outL, outW, outT) = False Then
+
+            Dim adx As Double
+            Dim ady As Double
+            Dim adz As Double
+
+            If TryGetModelDocBoxDimsInches(mdl, adx, ady, adz) Then
+                SortThreeDimensions adx, ady, adz, outL, outW, outT
+            End If
+
+        End If
+
+    End If
+
+    ReadFinalBboxFromOwnCandidateFile = (outL > 0# And outW > 0# And outT > 0#)
+
+CleanExit:
+    On Error Resume Next
+
+    If Not mdl Is Nothing Then swApp.CloseDoc mdl.GetTitle
+
+    Set mdl = Nothing
+    Set fso = Nothing
+
+    Exit Function
+
+ErrHandler:
+    LogLine "ReadFinalBboxFromOwnCandidateFile error: " & Err.Description
+    ReadFinalBboxFromOwnCandidateFile = False
+    Resume CleanExit
+End Function
+
+Private Function TryReadBestFitDimsFromAssemblyCandidate(ByVal asmModel As Object, _
+                                                         ByRef outL As Double, _
+                                                         ByRef outW As Double, _
+                                                         ByRef outT As Double) As Boolean
+On Error GoTo ErrHandler
+
+    TryReadBestFitDimsFromAssemblyCandidate = False
+
+    outL = 0#
+    outW = 0#
+    outT = 0#
+
+    If asmModel Is Nothing Then Exit Function
+    If asmModel.GetType <> swDocASSEMBLY Then Exit Function
+
+    Dim vComps As Variant
+    vComps = asmModel.GetComponents(False)
+
+    If IsEmpty(vComps) Then Exit Function
+    If IsArray(vComps) = False Then Exit Function
+
+    Dim bestVol As Double
+    bestVol = -1#
+
+    Dim i As Long
+    Dim swComp As Object
+    Dim partDoc As Object
+
+    Dim L As Double
+    Dim W As Double
+    Dim T As Double
+
+    For i = 0 To UBound(vComps)
+
+        Set swComp = vComps(i)
+
+        If Not swComp Is Nothing Then
+            If swComp.IsSuppressed = False Then
+
+                Set partDoc = swComp.GetModelDoc2
+
+                If Not partDoc Is Nothing Then
+                    If partDoc.GetType = swDocPART Then
+
+                        L = 0#: W = 0#: T = 0#
+
+                        If TryCreateAndReadBestFitBoundingBox(partDoc, L, W, T) = False Then
+
+                            Dim dx As Double
+                            Dim dy As Double
+                            Dim dz As Double
+
+                            If GetPartBoundingBoxInches(partDoc, dx, dy, dz) Then
+                                SortThreeDimensions dx, dy, dz, L, W, T
+                            End If
+
+                        End If
+
+                        If L > 0# And W > 0# And T > 0# Then
+                            If L * W * T > bestVol Then
+                                bestVol = L * W * T
+                                outL = L
+                                outW = W
+                                outT = T
+                            End If
+                        End If
+
+                    End If
+                End If
+
+            End If
+        End If
+
+    Next i
+
+    TryReadBestFitDimsFromAssemblyCandidate = (outL > 0# And outW > 0# And outT > 0#)
+    Exit Function
+
+ErrHandler:
+    TryReadBestFitDimsFromAssemblyCandidate = False
+End Function
 
 Private Function TryGetPullcoreBestFitDims(ByVal cadIdx As Long, _
                                            ByRef outL As Double, _
