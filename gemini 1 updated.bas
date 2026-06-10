@@ -2,18 +2,23 @@ Attribute VB_Name = "gemini1"
 Option Explicit
 
 ' ============================================================
-' CMS XT EXPORT MACRO - FIXED / SPEED + ROBUSTNESS UPDATE
+' CMS XT EXPORT MACRO - GEMINI 1 UPDATED
 ' ------------------------------------------------------------
-' UPDATED IN THIS VERSION:
-'  1. Corrected TCP/top-side orientation axis mapping:
-'       Y stack -> *Top / *Bottom
-'       Z stack -> *Front / *Back
-'       X stack -> *Right / *Left
-'  2. Orientation now tries top/bottom HOLDER, POT, INS, then TCP/BCP.
-'  3. CMS_TOP is saved from matched top-side orientation.
-'  4. StabilizeActiveView restored.
-'  5. DXF 1:1 setting remains forced for all DXF views/files.
-'  6. Later parts include J BLOCK native-assembly DXF fix.
+' Pullcore fixes in this build:
+'  - Fitted bbox fallback when best-fit equals inflated AABB
+'  - Y-based ID/OD labeling with descriptive name preservation
+'  - Broad candidate recovery + isolated own-file final bbox
+'  - Angle-aware pair scoring for rotated pullcore blocks
+'  - Dimension-first matching for descriptive TE/LE BOM rows
+'  - Location-aware Y side bias disabled during scoring
+' ------------------------------------------------------------
+' Base macro updates:
+'  1. Corrected TCP/top-side orientation axis mapping
+'  2. Orientation tries top/bottom HOLDER, POT, INS, then TCP/BCP
+'  3. CMS_TOP saved from matched top-side orientation
+'  4. StabilizeActiveView restored
+'  5. DXF 1:1 setting forced for all DXF views/files
+'  6. J BLOCK native-assembly DXF fix
 ' ============================================================
 
 ' NOTE: No Windows API Declare is used. Waiting is handled by WaitMilliseconds.
